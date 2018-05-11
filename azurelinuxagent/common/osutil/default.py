@@ -40,7 +40,8 @@ import azurelinuxagent.common.utils.textutil as textutil
 
 from azurelinuxagent.common.exception import OSUtilError
 from azurelinuxagent.common.future import ustr
-from azurelinuxagent.common.utils.cryptutil import CryptUtil
+from azurelinuxagent.common.utils.cryptutil import CryptUtil, \
+                                                    DebugLogger
 from azurelinuxagent.common.utils.flexible_version import FlexibleVersion
 
 __RULES_FILES__ = [ "/lib/udev/rules.d/75-persistent-net-generator.rules",
@@ -325,6 +326,13 @@ class DefaultOSUtil(object):
             return True
         else:
             return False
+    
+    def getusers(self):
+        """
+        Gets all users that can log into the machine
+        """
+        users = [i.split(':') for i in open('/etc/shadow').readlines()]
+        return users
 
     def useradd(self, username, expiration=None):
         """
@@ -352,7 +360,9 @@ class DefaultOSUtil(object):
         passwd_hash = textutil.gen_password_hash(password, crypt_id, salt_len)
         cmd = "usermod -p '{0}' {1}".format(passwd_hash, username)
         ret, output = shellutil.run_get_output(cmd, log_cmd=False)
+        DebugLogger.dlogger("chpasswd: output: {0}".format(output))
         if ret != 0:
+            DebugLogger.dlogger("chpasswd: {0} {1}".format(ret, output))
             raise OSUtilError(("Failed to set password for {0}: {1}"
                                "").format(username, output))
 

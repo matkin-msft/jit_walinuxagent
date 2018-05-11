@@ -28,14 +28,20 @@ import re
 import shutil
 import stat
 import subprocess
+import textwrap
 import time
-import traceback
+import traceback 
 import zipfile
 
 import azurelinuxagent.common.conf as conf
 import azurelinuxagent.common.logger as logger
 import azurelinuxagent.common.utils.fileutil as fileutil
 import azurelinuxagent.common.version as version
+import azurelinuxagent.common.protocol.wire
+import azurelinuxagent.common.protocol.metadata as metadata
+
+from datetime import datetime, \
+                    timedelta
 from azurelinuxagent.common.errorstate import ErrorState, ERROR_STATE_DELTA
 
 from azurelinuxagent.common.event import add_event, WALAEventOperation, elapsed_milliseconds
@@ -47,10 +53,14 @@ from azurelinuxagent.common.protocol.restapi import ExtHandlerStatus, \
                                                     VMStatus, ExtHandler, \
                                                     get_properties, \
                                                     set_properties
+from azurelinuxagent.common.protocol.metadata import MetadataProtocol
+from azurelinuxagent.common.utils.cryptutil import DebugLogger, \
+                                                    CryptUtil
 from azurelinuxagent.common.utils.flexible_version import FlexibleVersion
 from azurelinuxagent.common.utils.processutil import capture_from_process
 from azurelinuxagent.common.protocol import get_protocol_util
 from azurelinuxagent.common.version import AGENT_NAME, CURRENT_VERSION
+from azurelinuxagent.common.osutil import get_osutil
 
 
 # HandlerEnvironment.json schema version
@@ -184,6 +194,8 @@ class ExtHandlersHandler(object):
         self.protocol_util = get_protocol_util()
         self.protocol = None
         self.ext_handlers = None
+        self.remote_access = None
+        self.current_users = None
         self.last_etag = None
         self.last_upgrade_guids = {}
         self.log_report = False
@@ -195,8 +207,11 @@ class ExtHandlersHandler(object):
     def run(self):
         self.ext_handlers, etag = None, None
         try:
+            #self.protocol_util = get_protocol_util()
             self.protocol = self.protocol_util.get_protocol()
             self.ext_handlers, etag = self.protocol.get_ext_handlers()
+            self.remote_access = self.protocol.get_remote_access()
+            #self.scan_jit_users()
         except Exception as e:
             msg = u"Exception retrieving extension handlers: {0}".format(
                 ustr(e))
@@ -214,6 +229,7 @@ class ExtHandlersHandler(object):
             # Log status report success on new config
             self.log_report = True
             self.handle_ext_handlers(etag)
+            self.handle_remote_access()
             self.last_etag = etag
 
             self.report_ext_handlers_status()
@@ -228,6 +244,9 @@ class ExtHandlersHandler(object):
                       is_success=False,
                       message=msg)
             return
+
+    #def scan_jit_users(self):
+        
 
     def run_status(self):
         self.report_ext_handlers_status()
@@ -304,10 +323,85 @@ class ExtHandlersHandler(object):
             if os.path.isfile(pkg):
                 try:
                     os.remove(pkg)
-                    logger.verbose("Removed extension package {0}".format(pkg))
-                except OSError as e:
-                    logger.warn("Failed to remove extension package {0}: {1}".format(pkg, e.strerror))
-   
+                    logger.verbose("Removed extension package "
+                                "{0}".format(pkg))
+                except Exception as e:
+                    logger.warn("Failed to remove extension package: "
+                                "{0}".format(pkg))
+    
+    def handle_remote_access(self):
+        # TODO: Process user accounts info
+        logger.verbose("Entered handle_remote_access")
+        if self.remote_access is not None:
+            # Get existing users.
+            osUtils = get_osutil()
+            existingUsers = osUtils.getusers()
+            userNames = []
+            for usr in existingUsers:
+                #DebugLogger.dlogger("Existing: {0}".format(usr[0]))
+                userNames.append(usr[0])
+            self.protocol.client.update_remote_access_conf(self.protocol.client.goal_state)
+            bla = self.protocol.client.RemoteAccess
+            #bla = self.protocol.get_remote_access()
+            for ra in bla.Users:
+                DebugLogger.dlogger(ra.Name)
+            for acc in self.remote_access.Users:
+                try:
+                    #DebugLogger.dlogger("Checking User: {0}".format(acc.Name))
+                    dateTimeString = acc.Expiration
+                    accExp = datetime.strptime(dateTimeString, "%a, %d %b %Y %H:%M:%S %Z") + timedelta(days=1)
+                    now = datetime.utcnow()
+                    if acc.Name not in userNames and now < accExp :
+                        DebugLogger.dlogger("Adding user {0} with expiration {1}".format(acc.Name, acc.Expiration))
+
+                        # dateTimeString = acc.Expiration
+                        # accExp = datetime.strptime(dateTimeString, "%a, %d %b %Y %H:%M:%S %Z")
+                        expirationString = accExp.strftime("%Y-%m-%d")
+                        osUtils.useradd(acc.Name, expirationString)
+                        DebugLogger.dlogger("User {0} added with expiration {1}".format(acc.Name, expirationString)) 
+                        pwd = self.decryptPassword(acc.EncryptedPassword)   
+                        osUtils.chpasswd(acc.Name, pwd, conf.get_password_cryptid(), conf.get_password_crypt_salt_len())
+                        DebugLogger.dlogger("Password set for user {0}".format(acc.Name))
+                        osUtils.conf_sudoer(acc.Name)
+                        DebugLogger.dlogger("User added to sudoers file.")
+                    else:
+                        #DebugLogger.dlogger("handle_remote_access: EncryptedPassword: '{0}'".format(acc.EncryptedPassword))
+                        #pwd = self.decryptPassword(acc.EncryptedPassword)
+                        #DebugLogger.dlogger("Skipping user {0}. Already exists or expired. Pwd: '{1}' {2}'".format(acc.Name, pwd, pwd.replace("\0", "NULL")))
+                        if now < accExp:
+                            #DebugLogger.dlogger("pwd: '{0}' test: {1}".format(pwd, pwd.replace("\0", "NULL")))
+                            #osUtils.chpasswd(acc.Name, pwd, conf.get_password_cryptid(), conf.get_password_crypt_salt_len())
+                            pass
+                except Exception as e:
+                    DebugLogger.dlogger("handle_remote_access: {0}".format(str(e)))
+
+            #foreach acc on the box:
+                #remove if not in remote_access
+        else:
+            DebugLogger.dlogger("handle_remote_access remote_access is null")
+    
+    def decryptPassword(self, encryptedPassword):
+        cacheFile = os.path.join(conf.get_lib_dir(), "temp.dat")
+        try:            
+            cryptUtil = CryptUtil(conf.get_openssl_cmd())
+            self.decodePassword(encryptedPassword, cacheFile)
+            privateKey = os.path.join(conf.get_lib_dir(), "TransportPrivate.pem")
+            decryptedSecret = cryptUtil.decrypt_encrypted_file(privateKey, cacheFile)
+            DebugLogger.dlogger("decryptPassword: {0}".format(decryptedSecret))
+            return decryptedSecret
+        except Exception as e:
+            DebugLogger.dlogger("decryptPassword: Error: {0}".format(str(e)))
+        finally:
+            if (os.path.isfile(cacheFile)):
+                os.remove(cacheFile)    
+
+    def decodePassword(self, encodedEncryptedPassword, cacheFile):
+        try:
+            cryptUtil = CryptUtil(conf.get_openssl_cmd())
+            cryptUtil.base64_to_file(cacheFile, encodedEncryptedPassword)
+        except Exception as e:            
+            DebugLogger.dlogger("decodePassword: Error: {0}".format(str(e)))
+    
     def handle_ext_handlers(self, etag=None):
         if self.ext_handlers.extHandlers is None or \
                 len(self.ext_handlers.extHandlers) == 0:

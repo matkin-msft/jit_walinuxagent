@@ -19,12 +19,20 @@
 
 import base64
 import struct
+import os.path
+import subprocess
 
 from azurelinuxagent.common.future import ustr, bytebuffer
 from azurelinuxagent.common.exception import CryptError
 
 import azurelinuxagent.common.logger as logger
 import azurelinuxagent.common.utils.shellutil as shellutil
+
+class DebugLogger():
+    @staticmethod
+    def dlogger(message):
+       with open("/var/log/waagent.log", "a") as myFile:
+            myFile.write("DEBUG: {0}\n".format(message)) 
 
 class CryptUtil(object):
     def __init__(self, openssl_cmd):
@@ -70,6 +78,59 @@ class CryptUtil(object):
         rc = shellutil.run(cmd)
         if rc != 0:
             logger.error("Failed to decrypt {0}".format(p7m_file))
+    
+    def decrypt_encrypted_file(self, privateKey, encryptedFile):
+        cmd = "{0} cms -decrypt -inform DER -inkey {1} -in {2}".format(self.openssl_cmd, privateKey, encryptedFile)
+        output = shellutil.run_get_output(cmd)
+        #return output[1].decode('utf8').replace("\0", "")
+        return output[1].replace("\0", "")
+
+    def decryptStringWithPrivateKey(self, input_text, privateKey):
+        dataCacheFile = "{0}.dat".format(privateKey)
+        if os.path.isfile(privateKey):
+            logger.verbose("criptutil: private key exists {0}".format(privateKey))
+            #DebugLogger.dlogger("criptutil: private key exists {0}".format(privateKey))
+            # write cache file.
+
+            with open(dataCacheFile, "w") as dataWrite:
+                dataWrite.write(input_text)
+                
+            try:
+                cmd = "openssl pkeyutl -decrypt -inkey {0} -in {1}".format(privateKey, dataCacheFile)
+                output = shellutil.run_get_output(cmd) 
+                if output[0] == 0:
+                    return output[1]
+                else:
+                    # TODO: check error handling flow in this scenario.
+                    logger.error("cryptutil: Unable to decrypt password using {0}".format(privateKey))
+                    return None
+            finally:
+                if os.path.isfile(dataCacheFile):
+                    logger.verbose("cryptutil: Deleting cache file {0}".format(dataCacheFile))
+                    os.remove(dataCacheFile)
+                    logger.verbose("cryptutil: data cache file deleted {0}".format(dataCacheFile))
+                else:
+                    logger.warn("cryptutil: data cache file did not exist {0}".format(dataCacheFile))            
+        else:
+            logger.error("private key file does not exist: {0}".format(privateKey))
+            #DebugLogger.dlogger("criptutil: private key file does not exist: {0}".format(privateKey))
+            return None
+    
+    def RunSendStdin(self, cmd, input, chk_err=True):
+        try:
+            me = subprocess.Popen([cmd], shell=True, stdin=subprocess.PIPE,stderr=subprocess.STDOUT,stdout=subprocess.PIPE)
+            output=me.communicate(input)
+        except OSError as e:
+            if chk_err :
+                DebugLogger.dlogger('CalledProcessError.  Error Code is ' + str(me.returncode))
+                DebugLogger.dlogger('CalledProcessError. Command string was ' + cmd)
+                DebugLogger.dlogger('CalledProcessError.  Command result was ' + output[0].decode('latin-1'))
+                return 1,output[0].decode('latin-1')
+        if me.returncode is not 0 and chk_err is True:
+                DebugLogger.dlogger('CalledProcessError.  Error Code is ' + str(me.returncode))
+                DebugLogger.dlogger('CalledProcessError. Command string was ' + cmd)
+                DebugLogger.dlogger('CalledProcessError.  Command result was ' + output[0].decode('latin-1'))
+        return me.returncode,output[0].decode('latin-1')
 
     def crt_to_ssh(self, input_file, output_file):
         shellutil.run("ssh-keygen -i -m PKCS8 -f {0} >> {1}".format(input_file,
@@ -127,4 +188,9 @@ class CryptUtil(object):
                 curr = 0
                 index = 7
         return bytes(byte_array)
+
+    def base64_to_file(self, cacheFile, base64str):
+        with open(cacheFile, "wb") as c:
+            c.write(base64.b64decode(base64str))
+            #c.write(base64.decodestring(base64str))
 

@@ -1,0 +1,13 @@
+[{
+    "name": "WALinuxAgent",
+    "version": 1.0,
+    "handlerManifest": {
+        "installCommand": "",
+        "uninstallCommand": "",
+        "updateCommand": "",
+        "enableCommand": "python -u bin/WALinuxAgent-2.2.19-py2.7.egg -run-exthandlers",
+        "disableCommand": "",
+        "rebootAfterInstall": false,
+        "reportHeartbeat": false
+    }
+}]
